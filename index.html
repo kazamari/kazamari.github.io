@@ -7,168 +7,46 @@
 	<h1>Hello World</h1>
 	<p>I'm hosted with GitHub Pages.</p>
 <!--
-package ru.sitesoft.fssp.service;
+/*
+Скрипт переноса новостей из ленты новостей на incom.ru в базу данных rb_dzn_cottage
+[in] @domain
+*/
+declare @domain varchar(100)
+set @domain = 'ntest.incom.ru'
+declare @id_site int
+select @id_site = id from [domains] where name like @domain
+declare @cid int
+declare @nID int
+/*
+select * from realtyobjects.dbo.page
+where rubric='published_news'
+and id in (select id_news from realtyobjects.dbo.news_publications np
+join realtyobjects.dbo.publications p on p.id=np.id_publications where p.domen = @domain )
+*/
+DECLARE curRub CURSOR LOCAL FAST_FORWARD FOR
+	SELECT ID from realtyobjects.dbo.page
+	where rubric='published_news'
+	and id in (select id_news from realtyobjects.dbo.news_publications np
+	join realtyobjects.dbo.publications p on p.id=np.id_publications where p.domen = @domain )
 
-import android.content.Context;
-import android.content.pm.PackageManager.NameNotFoundException;
-import android.os.AsyncTask;
-import android.provider.Settings.Secure;
-import io.fabric.sdk.android.services.common.AbstractSpiCall;
-import io.fabric.sdk.android.services.network.HttpRequest;
-import java.io.IOException;
-import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
-import java.util.HashMap;
-import okhttp3.OkHttpClient;
-import okhttp3.Request.Builder;
-import org.apache.http.client.ClientProtocolException;
-import org.json.JSONException;
-import ru.sitesoft.fssp.MyApp;
-import ru.sitesoft.fssp.helper.PrefsHelper;
-
-public class Service {
-    public static final String TYPE_FORM = "form";
-    public static final String TYPE_NUM = "num";
-    public static final String TYPE_YUR = "yur";
-    public static volatile Service instance;
-    private int appVersion;
-    public ServiceHandler handler;
-    private OkHttpClient mOkHttpClient;
-    private String servicePath = "https://api.fssprus.ru/api/v2/";
-    private String udid;
-
-    private class RESTTask extends AsyncTask<String, Void, String> {
-        private ServiceHandler handler;
-        private int status = 0;
-
-        public RESTTask(ServiceHandler h) {
-            this.handler = h;
-            this.status = 0;
-        }
-
-        /* Access modifiers changed, original: protected */
-        public void onPreExecute() {
-        }
-
-        /* Access modifiers changed, original: protected|varargs */
-        public String doInBackground(String... args) {
-            try {
-                return Service.this.queryRESTurl(args[0]);
-            } catch (ClientProtocolException e) {
-                e.printStackTrace();
-                this.status = -1;
-                return e.getLocalizedMessage();
-            } catch (IOException e2) {
-                e2.printStackTrace();
-                this.status = -1;
-                return e2.getLocalizedMessage();
-            }
-        }
-
-        /* Access modifiers changed, original: protected */
-        public void onPostExecute(String result) {
-            if (this.handler != null) {
-                if (this.status == 0) {
-                    try {
-                        this.handler.serviceDidFinish(result);
-                        return;
-                    } catch (JSONException e) {
-                        e.printStackTrace();
-                        return;
-                    }
-                }
-                this.handler.serviceDidFailWithMessage(result);
-            }
-        }
-    }
-
-    public Service(Context context) {
-        this.udid = Secure.getString(context.getContentResolver(), "android_id");
-        this.mOkHttpClient = new OkHttpClient();
-        try {
-            this.appVersion = context.getPackageManager().getPackageInfo(context.getPackageName(), 0).versionCode;
-        } catch (NameNotFoundException e) {
-            e.printStackTrace();
-        }
-    }
-
-    public static Service getInstance(Context context) {
-        if (instance == null) {
-            synchronized (Service.class) {
-                if (instance == null) {
-                    instance = new Service(context);
-                }
-            }
-        }
-        return instance;
-    }
-
-    public void register(String regId) {
-        this.udid = Secure.getString(MyApp.getAppContext().getContentResolver(), "android_id");
-        HashMap<String, String> param = new HashMap();
-        param.put("gcm_regid", regId);
-        request("registration", param);
-    }
-
-    public void getMedia(Integer parentId) {
-        HashMap<String, String> param = new HashMap();
-        param.put("parent_id", String.valueOf(parentId));
-        request("multimedia", param);
-    }
-
-    public void getLocation() {
-        request("location");
-    }
-
-    public void sendCaptchaCode(String pCode) {
-        HashMap<String, String> param = new HashMap();
-        param.put("code", pCode);
-        request("captcha/check", param);
-    }
-
-    public void search(HashMap<String, String> params) {
-        String sessionId = PrefsHelper.getInstance().getSessionId();
-        if (!sessionId.equals("")) {
-            params.put(PrefsHelper.SESSION_ID, sessionId);
-        }
-        request("search", params);
-    }
-
-    public void addSubscription(HashMap<String, String> params) {
-        request("subscription/add", params);
-    }
-
-    public void removeSubscription(HashMap<String, String> params) {
-        request("subscription/remove", params);
-    }
-
-    private void request(String action) {
-        request(action, null);
-    }
-
-    private void request(String action, HashMap<String, String> param) {
-        String paramStr = "";
-        if (param != null) {
-            for (String key : param.keySet()) {
-                try {
-                    paramStr = paramStr + "&" + key + "=" + URLEncoder.encode((String) param.get(key), HttpRequest.CHARSET_UTF8);
-                } catch (UnsupportedEncodingException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-        String url = this.servicePath + action + "?" + (paramStr + "&udid=" + this.udid + "&ver=" + this.appVersion);
-        new RESTTask(this.handler).execute(new String[]{url});
-    }
-
-    private String queryRESTurl(String url) throws IOException {
-        return this.mOkHttpClient.newCall(new Builder().url(url).header("User-Agent", AbstractSpiCall.ANDROID_CLIENT_TYPE).build()).execute().body().string();
-    }
-
-    public void removeAllSubscription() {
-        request("subscription/remove_all");
-    }
-}
+OPEN curRub
+	WHILE 1=1 BEGIN
+		FETCH NEXT FROM curRub INTO @nID
+		IF @@FETCH_STATUS<>0 BREAK
+		INSERT INTO page (rubric, id_site, pagename, menuname, anons, material, date_material)
+		SELECT 'news', @id_site, pagename, menuname, anons, material, date_material FROM realtyobjects.dbo.page
+		WHERE id = @nID
+		
+		set @cid = @@IDENTITY
+		
+		insert into [image] ([filename], data, contenttype, norder, id_page, id_user, modified, type, description)
+		select [filename], data, contenttype, norder, @cid, id_user, modified, type, description
+		from realtyobjects.dbo.[image] where id_page = @nID
+		
+	END
+CLOSE curRub
+DEALLOCATE curRub
+/*Конец скрипта*/
 
 
 -->
