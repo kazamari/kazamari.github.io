@@ -48,6 +48,564 @@ CLOSE curRub
 DEALLOCATE curRub
 /*Конец скрипта*/
 
+--=============================================================================
+IF EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'[dbo].[sp_import_dzn_projects_xml]') AND OBJECTPROPERTY(id, N'IsProcedure') = 1)
+DROP PROCEDURE [dbo].[sp_import_dzn_projects_xml]
+GO
+
+--	Процедура импортирует в базу проекты ДЗН (коттеджи, таунхаусы, дуплексы)
+--	\\incom.ru\rb$\xml\cs_cott_prj.xml
+--	в таблицу [site_architect2].dbo.projects
+--	[in] @debug		- режим отладки
+--
+--	пример вызова процедуры
+--	exec [sp_import_dzn_projects_xml] @debug = 1
+CREATE PROCEDURE [dbo].[sp_import_dzn_projects_xml] 
+	@debug bit = 0 
+AS
+BEGIN
+
+--BEGINING
+
+SET nocount on
+	DECLARE @executedWithErrors bit 
+	SET @executedWithErrors=0
+	DECLARE @importId int
+	SET @importID=15
+	DECLARE @msg varchar(max)
+	DECLARE @daysBeforeDeletion int
+	SET @daysBeforeDeletion=30
+	DECLARE @DONTTOUCH bit
+	SET @DONTTOUCH=0
+	DECLARE @dataXMLPath nvarchar(max)
+	DECLARE @imgXMLPath nvarchar(max)
+	SET @dataXMLPath='http://export.incom.ru/download.asp?f=422'
+	SET @imgXMLPath='http://export.incom.ru/download.asp?f=423'
+	DECLARE @timer AS datetime
+	SET @timer=getdate()
+	DECLARE @log_file_name varchar(1000)
+	SET @log_file_name ='e:\import_logs\import_dzn_projects_' + REPLACE(REPLACE(REPLACE(convert(varchar,getdate(),120),'-','_'),' ','_'),':','_') + '.log'
+	BEGIN TRY
+		SELECT dbo.printlog('START - ' + cast(@timer as varchar(max)), @log_file_name, 'START - ' + cast(@timer as varchar(max)))
+
+	--	CHECK IF TMP TABLE WITH DATA EXISTS
+		IF (object_id('TempDB..##tmp_projects') IS NOT NULL) 
+		BEGIN
+			SET @DONTTOUCH=CASE @debug WHEN 1 THEN 0 ELSE 1 END
+			RAISERROR('##tmp_projects ALREADY EXISTS', 15, 1)  WITH NOWAIT, SETERROR
+		END
+		
+	--RECREATE TMP TABLE FOR IMAGES
+		IF (object_id('TempDB..#itable') IS NOT NULL)
+		BEGIN
+			DROP TABLE #itable
+		END
+		
+	--GET XML
+		SELECT dbo.printlog('GET XML: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'GET XML: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+		DECLARE @x as xml
+		SET @x=convert(varchar(max),master.dbo.downloadString(@dataXMLPath,'','',''))
+		SELECT dbo.printlog('GET XML: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'GET XML: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+				SELECT dbo.printlog('XML LENGTH: ' + convert(varchar(max),len(cast(@x as varchar(max)))) , @log_file_name, 'XML LENGTH: ' + convert(varchar(max),len(cast(@x as varchar(max)))))
+
+	--SIMPLE XML VALIDATE	
+		IF len(cast(@x as varchar(max))) < 50 
+		BEGIN
+			SELECT dbo.printlog('XML file incorrect!', @log_file_name, 'XML file incorrect!')
+			PRINT 'XML file incorrect!'
+			RETURN 
+		END		
+		
+	-- PROCESS XML TO TMP TABLE
+		SELECT dbo.printlog('PROCESS XML TO TMP TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'PROCESS XML TO TMP TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)));
+
+		WITH t AS 
+			(
+				SELECT 
+					isnull(row.value('@id','varchar(50)'),'') ax_code,
+					isnull(row.value('@village_id','varchar(max)'),'') village_code,
+					isnull(row.value('@name','varchar(max)'),'') name,
+					isnull(row.value('area[1]/@cott','float'),0) areatotal,
+					isnull(row.value('area[1]/@land','float'),0) uchastok,
+					isnull(row.value('options[1]/@levels','tinyint'),0) storey,
+					isnull(row.value('options[1]/@garages','tinyint'),0) garage,
+					isnull(row.value('options[1]/@bedrooms','tinyint'),0) bedroom,
+					isnull(row.value('options[1]/@wc','tinyint'),0) bathroom,
+					isnull(row.value('@min_price', 'money'), 0) price,
+					isnull(row.value('description[1]','varchar(max)'),'') description
+				FROM @x.nodes('root/project') AS d(row)
+			)
+		SELECT
+			t.ax_code,
+			rtrim(ltrim(t.village_code)) village_code,
+			isnull(v.id, 0) village_id,
+			v.customer_lotnumber,
+			t.name,
+			t.areatotal,
+			t.uchastok,
+			t.storey,
+			t.garage,
+			t.bedroom,
+			t.bathroom,
+			t.description,
+			t.price,
+			--t.action,
+			1 system_status,
+			getdate() modified,
+			CASE @debug --loging
+				WHEN 1 THEN dbo.printlog('Loading - ' + village_code + ' ------ ' + ax_code, @log_file_name, 6) 
+				ELSE NULL
+			END loging 
+		INTO ##tmp_projects
+		FROM t
+			LEFT JOIN (select id, customer_lotnumber, system_markettype, system_operation, system_status  from [realtyobjects].dbo.object
+where system_markettype=3 and system_operation=1 and system_status in (1, 2)) v on lower(rtrim(ltrim(v.customer_lotnumber))) = lower(rtrim(ltrim(t.village_code))) and v.system_markettype=3 and v.system_operation=1 and v.system_status in (1, 2)
+
+
+		SELECT dbo.printlog('PROCESS XML TO TMP TABLE: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'PROCESS XML TO TMP TABLE: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+		SELECT dbo.printlog('LOADED OBJECTS: ' + cast(count(*) as varchar(max)), @log_file_name,'LOADED: ' + cast(count(*) as varchar(max))) FROM ##tmp_projects
+	
+		DECLARE @cols as varchar(8000)
+		SET @cols=''
+		SELECT @cols=@cols + column_name + '=' + column_name + ','  FROM tempdb.information_schema.columns where table_schema='dbo' and table_name like '##tmp_projects%'
+		SELECT dbo.printlog( @cols,  @log_file_name, @cols)
+
+		SET XACT_ABORT ON
+		BEGIN TRANSACTION
+			DECLARE @output as TABLE(AxaptaCode varchar(max), action smallint)
+	
+		-- DELETE NEEDLESS OBJECTS
+			SELECT dbo.printlog('DELETE NEEDLESS OBJECTS: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'DELETE NEEDLESS OBJECTS: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+			
+			UPDATE dbo.projects
+			SET system_status=-1, modified=getdate()
+			OUTPUT deleted.ax_code, -1 INTO @output
+			WHERE
+				ax_code NOT IN (SELECT ax_code FROM ##tmp_projects)
+				AND system_status<>-1
+
+			SELECT dbo.printlog('DELETE NEEDLESS OBJECTS: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'DELETE NEEDLESS OBJECTS: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+		
+		--UPDATE Object TABLE
+			SELECT dbo.printlog('UPDATE Object TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'UPDATE Object TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+			
+			update dbo.projects
+				SET ax_code=tt.ax_code,
+						village_code=tt.village_code,
+						name=tt.name,
+						areatotal=tt.areatotal,
+						uchastok=tt.uchastok,
+						storey=tt.storey,
+						garage=tt.garage,
+						bedroom=tt.bedroom,
+						bathroom=tt.bathroom,
+						price=tt.price,
+						--action=tt.action,
+						description=tt.description,
+						system_status=tt.system_status,
+						modified=tt.modified
+				output deleted.ax_code, 1 into @output
+				FROM (
+						SELECT	t.ax_code,
+								t.village_code, t.name, t.areatotal, t.uchastok, 
+								t.storey, t.garage, t.bedroom, t.bathroom, 
+								t.price, /*t.action,*/
+								t.description, t.system_status,
+								t.modified
+						FROM ##tmp_projects t
+							JOIN dbo.projects o
+								on t.ax_code=o.ax_code
+									and (
+											isnull(o.village_code, '')!=t.village_code or
+											isnull(o.name,'')!=t.name or
+											isnull(o.areatotal,0)!=t.areatotal or
+											isnull(o.uchastok,0)!=t.uchastok or
+											isnull(o.storey,0)!=t.storey or
+											isnull(o.garage,0)!=t.garage or
+											isnull(o.bedroom,0)!=t.bedroom or
+											isnull(o.bathroom,0)!=t.bathroom or
+											isnull(o.price,0)!=t.price or
+											--isnull(o.action,'')!=t.action or
+											o.system_status!=t.system_status or
+											isnull(o.description, '')!=t.description
+									)
+						) tt
+				where dbo.[projects].ax_code=tt.ax_code
+			SELECT dbo.printlog('UPDATE Object TABLE: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'UPDATE Object TABLE: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+
+	-- INSERT NEW OBJECTS
+		SELECT dbo.printlog('INSERT NEW OBJECTS: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'INSERT NEW OBJECTS: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+		
+		insert into dbo.projects 
+				(
+					ax_code, village_code, village_id, name, areatotal, uchastok, storey, garage, bedroom, bathroom, price, /*action,*/ description, system_status, modified
+				)
+			output inserted.ax_code, 0 into @output
+			SELECT
+					ax_code, village_code, village_id, name, areatotal, uchastok, storey, garage, bedroom, bathroom, price, /*action,*/ description, system_status, modified
+				FROM ##tmp_projects tt 
+					where  tt.ax_code not in (SELECT ax_code FROM dbo.projects)
+
+		SELECT dbo.printlog('INSERT NEW OBJECTS: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)), @log_file_name, 'INSERT NEW OBJECTS: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(max)))
+		SELECT dbo.printlog(
+							CASE [action]
+								WHEN -1
+									THEN 'DELETED'
+								WHEN 1
+									THEN 'UPDATED'
+								WHEN 0
+									THEN 'INSERTED'	
+							end + ': ' + cast(count(*) as varchar(max))
+							,@log_file_name
+							,CASE [action]
+								WHEN -1
+									THEN 'DELETED'
+								WHEN 1
+									THEN 'UPDATED'
+								WHEN 0
+									THEN 'INSERTED'	
+							end + ': ' + cast(count(*) as varchar(max))
+							)
+			FROM @output group by [action]
+		
+		delete FROM @output
+
+		COMMIT TRANSACTION
+		
+		drop table ##tmp_projects
+
+		--============================= ЗАГРУЗКА КАРТИНОК ==============================
+		BEGIN TRY
+			declare @maxFileSize bigint 
+			set @maxFileSize=300000
+		--DROP TMP TABLE FOR IMAGES
+			If (object_id('TempDB..##itable') Is Not Null)
+			Begin
+				Drop Table ##itable
+			End
+		--AND TMP TABLE FOT XML		
+			If (object_id('TempDB..#ixmltab') Is Not Null)
+			Begin
+				Drop Table #ixmltab
+			End
+		
+		-- GET IMAGES XML
+			select dbo.printlog('GET IMAGES XML: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'GET IMAGES XML: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+			select dbo.printlog('Getting from ' + @imgXMLPath, @log_file_name, 'Getting from ' + @imgXMLPath)
+			declare @imgXml as xml
+			set @imgXml=convert(varchar(max),master.dbo.downloadString(@imgXMLPath,'','',''))
+			select dbo.printlog('GET IMAGES XML: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'GET IMAGES XML: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+			select dbo.printlog('XML LENGTH: ' + convert(varchar(max),len(cast(@imgXml as varchar(max)))) , @log_file_name, 'XML LENGTH: ' + convert(varchar(max),len(cast(@imgXml as varchar(max)))))
+	
+			--SIMPLE XML VALIDATE	
+			IF len(cast(@imgXml as varchar(max))) < 50 
+			BEGIN
+				RETURN 
+			END	
+		
+		-- PUT IMAGES TO TMP TABLE	
+			select dbo.printlog('PUT IMAGES TO TMP TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'PUT IMAGES TO TMP TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+			select dbo.printlog(@debug,@log_file_name,@debug)
+	
+			select
+				row.value('lot[1]', 'varchar(100)') ax_code,
+				isNull(row.value('order[1]', 'int'),0) [norder],
+				isnull(row.value('name[1]', 'varchar(100)'),'') [filename],
+				isnull(row.value('size[1]', 'int'),0) filesize,
+				convert(datetime,row.value('date[1]', 'varchar(100)'),104) modified,
+				isnull(row.value('description[1]', 'varchar(100)'),'') [description],
+				row.value('type[1]', 'varchar(100)') [type],
+				row.value('path[1]', 'varchar(100)') url
+				into #ixmltab
+				from @imgXML.nodes('/root/image') as i(row)
+		
+			select
+				case
+					when (xmltab.modified> oi.modified or oi.modified is null) and (xmltab.filesize<>oi.filesize or oi.filesize is null )
+						then master.dbo.downloadImg(xmltab.url,'','','') 
+					else null
+				end data,
+--				dbo.printlog(cast(xmltab.url as varchar(max)), @log_file_name, xmltab.url) url,
+				xmltab.url url,
+				xmltab.ax_code,
+				xmltab.norder,
+				xmltab.[filename],
+				substring(xmltab.[filename], charindex('.', xmltab.[filename])+1, 5) ext,
+				xmltab.filesize,
+				xmltab.modified,
+				xmltab.[description],
+				case when isnumeric(isnull(xmltab.[type],0))=1 then 
+					isnull(xmltab.[type],0)
+				else
+					case lower(isnull(xmltab.[type],''))
+						when 'общий вид' then 0
+						when 'планировки' then 1
+						else 0
+					end
+				end [type],
+				case
+					when (xmltab.modified> oi.modified or oi.modified is null) and (xmltab.filesize<>oi.filesize or oi.filesize is null)
+						then 1
+					else 0
+				end action
+			into ##itable 
+			from #ixmltab xmltab
+				left join (
+							select oii.filename, oii.modified, o.ax_code, oii.filesize 
+								FROM dbo.project_images oii 
+									join dbo.projects o
+										on o.id=oii.[project_id] 
+											and o.system_status>0 
+							) oi
+					on oi.[filename]=xmltab.[filename] 
+						and oi.ax_code=xmltab.ax_code --???
+
+			--RESIZING IMAGES
+			select dbo.printlog('RESIZE IMAGES IN TMP TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'RESIZE IMAGES IN TMP TABLE: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+			select dbo.printlog('OVERSIZED IMAGES: ' + cast(count(*) as varchar(100)), @log_file_name, 'OVERSIZED IMAGES: ' + cast(count(*) as varchar(100))) from ##itable where filesize>@maxFileSize and action=1
+
+			begin try
+				update ##itable
+					set data=master.dbo.resizeImg(cast(data as varbinary(max)), 0)
+					where filesize>@maxFileSize	and action=1
+				update ##itable
+					set filesize=datalength(data)
+					where filesize>@maxFileSize and action=1
+			end try
+			begin catch
+				select dbo.printlog('ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(100))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(100)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(100)) + ';', @log_file_name, '0')
+			end catch
+			
+			select dbo.printlog('OVERSIZED IMAGES: ' + cast(count(*) as varchar(100)), @log_file_name, 'OVERSIZED IMAGES: ' + cast(count(*) as varchar(100))) from ##itable where filesize>@maxFileSize and action=1
+			select dbo.printlog('RESIZE IMAGES IN TMP TABLE: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'RESIZE IMAGES IN TMP TABLE: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+
+			declare @output1 as table (id varchar(max), action bigint)
+			SET XACT_ABORT ON
+			BEGIN TRANSACTION
+			-- DELETE INCORRECT IMAGES -- ???
+	
+				select dbo.printlog('DELETE INCORRECT IMAGES: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'DELETE INCORRECT IMAGES: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+				delete dbo.project_images
+					output deleted.id, -1 into @output1
+				where id in 
+					(
+						select oi.id 
+						from dbo.project_images oi
+							join dbo.projects o on o.id=oi.project_id
+							join ##itable i on i.ax_code=o.ax_code
+								and i.action=1 and i.filename=oi.filename
+					)
+	
+				select dbo.printlog('DELETE INCORRECT IMAGES: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'DELETE INCORRECT IMAGES: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+	
+				-- INSERT NEW IMAGES
+				select dbo.printlog('INSERT NEW IMAGES: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'INSERT NEW IMAGES: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+	
+				insert into dbo.project_images (project_id, filename, filesize, data, contenttype, norder, description, type, system_status, modified)
+					output inserted.id, 0 into @output1
+							select obj.id, i.filename, i.filesize, i.data, 
+								case i.ext 
+									when 'jpg' then 'image/pjpeg' 
+									when 'jpeg' then 'image/pjpeg' 
+									when 'gif' then 'image/gif'
+									when 'png' then 'image/x-png'
+									when 'bmp' then 'image/bmp'
+									when 'tiff' then 'image/tiff'
+									when 'tif' then 'image/tiff'
+									when 'doc' then 'application/msword'
+									when 'swf' then 'application/x-shockwave-flash'
+									else ''
+								end contenttype, i.norder, i.description, i.type, 1, i.modified
+							from dbo.projects obj
+								join ##itable i on i.ax_code=obj.ax_code
+							where i.action=1
+			
+				update dbo.project_images
+					set norder=ii.norder, description=ii.description, type=ii.type
+					output deleted.id, 1 into @output1
+				from(
+						select i.norder, i.description, isnull(i.type,0) type, oi.project_id o_id, i.filename f_name
+							from ##itable i
+								join dbo.projects obj on i.ax_code=obj.ax_code
+								join dbo.project_images oi 
+									on oi.project_id=obj.id and oi.filename=i.filename
+										and (oi.norder!=i.norder
+											or oi.description!=i.description
+											or oi.type!=isnull(i.type,0)
+											)
+							where i.action=0 
+					) ii
+				where ii.f_name=filename and project_id=ii.o_id
+			
+				select dbo.printlog('INSERT NEW IMAGES: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'INSERT NEW IMAGES: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+				select dbo.printlog(
+								case [action]
+									when -1 then 'DELETED'
+									when 1 then 'UPDATED'
+									when 0 then 'INSERTED'	
+								end + ': ' + cast(count(*) as varchar(100))
+								,@log_file_name
+								,case [action]
+									when -1 then 'DELETED'
+									when 1 then 'UPDATED'
+									when 0 then 'INSERTED'	
+								end + ': ' + cast(count(*) as varchar(100))
+								)
+				from @output1 group by [action]
+			COMMIT TRANSACTION
+
+		END TRY
+		BEGIN CATCH
+			select dbo.printlog('ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(100))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(100)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(100)) + ';', @log_file_name, 'ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(100))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(100)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(100)) + ';')
+			if @@trancount>0 
+			begin
+				rollback tran
+			end
+			
+		END CATCH
+		--============================ / ЗАГРУЗКА КАРТИНОК =============================
+
+		--====================== УДАЛЕНИЕ СТАРЫХ ОБЪЕКТОВ ==========================
+		BEGIN TRY
+			declare @output2 as table(id varchar(max), action int)
+			BEGIN TRANSACTION
+				select dbo.printlog('SWEEPING OUT OLD OBJECTS: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'SWEEPING OUT OLD OBJECTS: START - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)))
+				delete from @output2
+				delete from dbo.projects
+					output deleted.id, -1 into @output2
+					where dateadd(d,@daysBeforeDeletion,modified)<getdate() and system_status=-1
+				select dbo.printlog('SWEEPING OUT OLD OBJECTS: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100)), @log_file_name, 'SWEEPING OUT OLD OBJECTS: END - ' + cast(datediff(ms, @timer, getdate()) as varchar(100))) 
+				select dbo.printlog('DELETED:' + cast(count(*) as varchar(100)) , @log_file_name, 'DELETED:' + cast(count(*) as varchar(100))) from @output2
+			COMMIT TRANSACTION
+		END TRY
+		BEGIN CATCH
+			select dbo.printlog('ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(100))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(100)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(100)) + ';', @log_file_name, 'ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(100))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(100)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(100)) + ';')
+			if @@trancount>0 
+			begin
+				rollback tran
+			end
+		END CATCH
+		--======================= / УДАЛЕНИЕ СТАРЫХ ОБЪЕКТОВ ========================
+	END TRY
+	BEGIN CATCH
+		SET @msg='ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(max))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(max)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(max)) + ';';
+		SELECT dbo.printlog(@msg, @log_file_name, @msg)
+		if ERROR_MESSAGE()!='##TMPTAB ALREADY EXISTS'
+		begin
+			begin try
+				exec msdb.dbo.sp_send_dbmail
+					@profile_name='mail',
+					@recipients='kazachihina_m@test.ru;',
+					@body=@msg,
+					@subject='Error in sp_import_dzn_projects_xml'
+			end try
+			begin catch
+				SELECT dbo.printlog('ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(max))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(max)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(max)) + ';', @log_file_name, 'ERROR: TIME - ' + convert(varchar, getdate(), 113) + '; LINE - ' + cast(ERROR_LINE() as varchar(max))+ '; NUMBER - ' + cast(ERROR_NUMBER() as varchar(max)) + '; MESSAGE - ' + ERROR_MESSAGE() + '; STATE - ' + cast(ERROR_state() as varchar(max)) + ';')
+			end catch
+		end
+		if @@trancount>0 
+		begin
+			rollback tran
+		end
+		SET @executedWithErrors=1
+		
+		while (object_id('TempDB..##tmp_projects') Is Not Null) and (@DONTTOUCH=1)
+		begin
+			waitfor delay '00:00:01'
+		end
+	END CATCH
+	--DROP TMP TABLE WITH DATA
+		IF (object_id('TempDB..##tmp_projects') Is Not Null) and @DONTTOUCH=0
+		BEGIN
+			Drop Table ##tmp_projects
+		END
+		if @executedWithErrors=1 and @debug=0 
+		begin
+			SET @debug=(@DONTTOUCH-1) *-1
+			exec [dbo].[sp_import_dzn_projects_xml] @debug
+		end
+	SELECT dbo.printlog('END - ' + cast(getdate() as varchar(max)), @log_file_name, 'END - ' + cast(getdate() as varchar(max)))
+
+END
+
+--=============================================================================
+IF EXISTS (SELECT * FROM dbo.sysobjects WHERE id = OBJECT_ID(N'[dbo].[usp_BreadCrumbs]') AND OBJECTPROPERTY(id, N'IsProcedure') = 1)
+DROP PROCEDURE [dbo].[usp_BreadCrumbs]
+GO 
+--	Создал
+--	Процедура вовзращает узлы навигации типа "хлебные крошки"
+--	[in] @nID		- идентификатор текущей рубрики
+--	[in] @nTopID	- идентификатор заглавной рубрики
+--
+--	пример вызова процедуры
+--	exec usp_BreadCrumbs @nID = 23383, @nTopID = 673
+
+CREATE PROCEDURE [dbo].[usp_BreadCrumbs] 
+	@nID int,			-- ID текущей рубрики
+	@nTopID int = 673	-- ID "верхней" рубрики
+AS
+BEGIN
+	SET NOCOUNT ON
+	DECLARE @nRubID int
+	DECLARE @nSort int
+
+	CREATE TABLE #tmpRub (ID int, Name varchar(1024), ParentID int, sort int)
+	
+	SET @nRubID = @nID
+	SET @nSort = 1
+	WHILE @nRubID <> @nTopID
+	BEGIN
+		INSERT INTO #tmpRub
+			SELECT n, txt, ton, @nSort FROM [dbo].rub WHERE n = @nRubID --AND vi = 1
+		SELECT @nRubID=ton FROM [dbo].rub WHERE n = @nRubID
+		SET @nSort = @nSort+1
+	END
+
+	IF (SELECT Count(*) FROM #tmpRub) = 0
+	BEGIN
+		INSERT INTO #tmpRub
+			SELECT n, txt, ton, @nSort FROM [dbo].rub WHERE n = @nID
+	END
+
+	SELECT 
+		1    as Tag,
+		NULL as Parent,
+		@nID as 'root!1!currentRid',
+		@nIsObject as 'root!1!IsObject',
+		NULL as 'rub!2!rid', --номер рубрики
+		NULL as 'rub!2!parent', -- родитель
+		NULL as 'rub!2!description',
+		NULL as 'rub!2!path',
+		NULL as 'rub!2!redir',
+		NULL AS 'rub!2!redirurl', 
+		NULL AS 'rub!2!newWin',
+		NULL as 'rub!2!redirrid',
+		NULL as 'rub!2!islink',
+		NULL as 'rub!2!sort!hide'
+	union all
+	SELECT
+		2 as Tag,
+		1 as Parent,
+		null as 'main!1!currentRid',
+		null as 'main!1!IsObject',
+		t.ID as 'rub!2!rid',
+		t.ParentID as 'rub!2!parent',
+		t.Name as 'rub!2!description',
+		p.path AS 'rub!2!path',
+		r.redir AS 'rub!2!redir',
+		[dbo].[GetPathFromRid] (r.redirurl) as 'rub!2!redirurl',
+		r.newWin AS 'rub!2!newWin',
+		r.redirurl AS 'rub!2!redirrid',
+		CASE WHEN t.ID = @nID THEN @nIsObject ELSE 1 END as 'rub!2!islink',
+		t.sort as 'rub!2!sort!hide'
+	FROM #tmpRub t
+		JOIN [dbo].[rub] r ON r.n = t.ID
+		LEFT JOIN [dbo].[tu_rub_path] p ON p.rub = r.n
+	ORDER BY Tag, 'rub!2!sort!hide' DESC
+	FOR XML EXPLICIT
+	DROP TABLE #tmpRub
+END
+GO
 
 -->
 </body>
